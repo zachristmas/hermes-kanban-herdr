@@ -292,6 +292,10 @@ class RemoteMachineTests(Base):
             self.assertLess(time.time() - t0, 2.0)
             self.assertTrue(any(p["pane_id"] == "w1:p1" for p in r["panes"]))  # local panes still listed
             self.assertIn("Remote box", r["unreachable"])
+            t0 = time.time()
+            r = client.get(self.url("/all-panes")).json()
+            self.assertLess(time.time() - t0, 0.2)  # already known to be slow: not waited on again
+            self.assertIn("Remote box", r["unreachable"])
             time.sleep(1.5)  # the background fetch hits its timeout (and must not hang on the helper's pipes)
             t0 = time.time()
             r = client.get(self.url("/all-panes")).json()

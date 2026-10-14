@@ -321,6 +321,8 @@ async def _remote_panes(m: dict) -> list[dict]:
         return task.result()
     if cached and cached[2]:
         return cached[1]  # stale beats nothing while the refresh is still running
+    # Count it as down for now so the next poll does not wait again; the fetch overwrites this if it succeeds.
+    _remote_cache[m["id"]] = (time.time(), [], False)
     raise HerdrUnavailable("machine is slow to answer")
 
 
