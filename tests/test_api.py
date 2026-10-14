@@ -200,6 +200,47 @@ class PollingFallbackTests(Base):
             self.assertTrue(msg["text"].endswith("polled\n"))
 
 
+class CliTransportMixin:
+    """Run the same tests with the Herdr CLI as the transport (what Windows uses: no unix sockets in its Python)."""
+
+    def setUp(self):
+        os.environ["KANBAN_HERDR_TRANSPORT"] = "cli"
+        os.environ["HERDR_BIN"] = f'{sys.executable} {HERE / "stub_herdr_cli.py"}'
+        super().setUp()
+
+    def tearDown(self):
+        super().tearDown()
+        os.environ.pop("KANBAN_HERDR_TRANSPORT", None)
+        os.environ.pop("HERDR_BIN", None)
+
+
+class CliPaneListTests(CliTransportMixin, PaneListTests):
+    pass
+
+
+class CliLinkTests(CliTransportMixin, LinkTests):
+    pass
+
+
+class CliStreamTests(CliTransportMixin, StreamTests):
+    pass
+
+
+class CliArgsTests(unittest.TestCase):
+    def test_maps_methods_to_cli_calls(self):
+        self.assertEqual(api.cli_args("pane.list", {}), ["pane", "list"])
+        self.assertEqual(api.cli_args("pane.get", {"pane_id": "w1:p1"}), ["pane", "get", "w1:p1"])
+        self.assertEqual(api.cli_args("pane.read", {"pane_id": "w1:p1", "source": "recent", "lines": 50}),
+                         ["pane", "read", "w1:p1", "--source", "recent", "--lines", "50", "--format", "text"])
+        self.assertEqual(
+            api.cli_args("pane.report_metadata", {"pane_id": "w1:p1", "source": "kanban-link", "tokens": {"kanban_task": "t_1", "kanban_board": None}}),
+            ["pane", "report-metadata", "w1:p1", "--source", "kanban-link", "--token", "kanban_task=t_1", "--clear-token", "kanban_board"])
+
+    def test_unsupported_method_is_unavailable(self):
+        with self.assertRaises(api.HerdrUnavailable):
+            api.cli_args("pane.send_text", {"pane_id": "w1:p1"})
+
+
 class CleanTextTests(unittest.TestCase):
     def test_keeps_tail_and_strips_controls(self):
         self.assertEqual(api.clean_text("a\r\nb\rc\x00"), "a\nb\nc")

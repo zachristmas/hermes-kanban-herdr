@@ -42,8 +42,11 @@ Unlike front-end-only plugins, this one has a backend (`plugin_api.py`), and Her
 plugin routes only when the dashboard starts; a rescan is not enough. Front-end changes after
 that only need a hard refresh.
 
-The dashboard host must be able to reach Herdr's socket (`HERDR_SOCKET_PATH`, default
-`~/.config/herdr/herdr.sock`). If it can't, the section says so.
+The dashboard host must be able to reach Herdr. On macOS and Linux the plugin uses Herdr's unix
+socket (`HERDR_SOCKET_PATH`, default `~/.config/herdr/herdr.sock`). On Windows, Hermes' Python has
+no unix sockets, so the plugin runs the `herdr` CLI instead (found on `PATH`, under
+`~/.herdr/packages/standalone/releases/*/`, or via `HERDR_BIN`). If Herdr can't be reached, the
+section says so.
 
 ## Security notes
 
@@ -51,18 +54,19 @@ The dashboard host must be able to reach Herdr's socket (`HERDR_SOCKET_PATH`, de
   only behind the dashboard's own login (same auth as the rest of the plugin API).
 - Pane ids and task/board ids are validated; at most 4 concurrent streams; text is stripped of
   control characters and capped at 256 KB per snapshot.
-- The view is a snapshot of the pane's recent screen text, refreshed on each Herdr update
-  (coalesced), not a raw byte stream. Colours are not rendered.
+- The view is a snapshot of the pane's recent screen text, not a raw byte stream. Colours are not
+  rendered. With the socket it refreshes on each Herdr event (coalesced); with the CLI transport
+  it polls about every 0.7 s.
 
 ## Platform
 
-Developed and tested against Herdr 0.9.3 on macOS. It uses Herdr's unix socket, so Windows is
-unverified.
+Developed against Herdr 0.9.3 on macOS (socket) and run on Windows (CLI transport). Both use the
+same API shapes, because the CLI prints the same JSON the socket returns.
 
 ## Testing
 
 ```
-python3 -m unittest discover -s tests      # API tests against a fake Herdr socket (22)
+python3 -m unittest discover -s tests      # API tests against a fake Herdr socket, run over both transports (44)
 ```
 
 Browser tests (Playwright, `data-testid` selectors) need a dashboard with the plugin enabled

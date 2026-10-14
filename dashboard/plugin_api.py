@@ -17,7 +17,10 @@ import asyncio
 import json
 import logging
 import os
+import glob
 import re
+import shlex
+import shutil
 import tempfile
 import threading
 import time
@@ -66,6 +69,63 @@ def socket_path() -> str:
     return os.environ.get("HERDR_SOCKET_PATH") or os.path.expanduser("~/.config/herdr/herdr.sock")
 
 
+def _use_cli() -> bool:
+    """Python on Windows has no unix sockets, so talk to Herdr through its CLI there."""
+    forced = os.environ.get("KANBAN_HERDR_TRANSPORT")
+    if forced:
+        return forced == "cli"
+    return not hasattr(asyncio, "open_unix_connection")
+
+
+def herdr_command() -> list[str]:
+    env = os.environ.get("HERDR_BIN")
+    if env:
+        return shlex.split(env, posix=(os.name != "nt"))
+    found = shutil.which("herdr")
+    if not found:
+        pattern = os.path.join(os.path.expanduser("~"), ".herdr", "packages", "standalone", "releases", "*", "herdr*")
+        hits = sorted(h for h in glob.glob(pattern) if os.path.basename(h).lower() in ("herdr", "herdr.exe"))
+        found = hits[-1] if hits else None
+    if not found:
+        raise HerdrUnavailable("cannot find the herdr command (set HERDR_BIN)")
+    return [found]
+
+
+def cli_args(method: str, params: dict) -> list[str]:
+    """Map the few socket methods this plugin uses onto the equivalent ``herdr`` CLI call."""
+    pid = params.get("pane_id") or ""
+    if method == "pane.list":
+        return ["pane", "list"]
+    if method == "pane.get":
+        return ["pane", "get", pid]
+    if method == "pane.read":
+        return ["pane", "read", pid, "--source", str(params.get("source") or "recent"),
+                "--lines", str(int(params.get("lines") or READ_LINES)), "--format", "text"]
+    if method == "pane.report_metadata":
+        args = ["pane", "report-metadata", pid, "--source", str(params.get("source") or SOURCE)]
+        for name, value in (params.get("tokens") or {}).items():
+            args += ["--clear-token", name] if value is None else ["--token", f"{name}={value}"]
+        return args
+    raise HerdrUnavailable(f"{method} is not available without the herdr socket")
+
+
+async def _rpc_cli(method: str, params: dict) -> dict:
+    cmd = herdr_command() + cli_args(method, params)
+    try:
+        proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, _err = await asyncio.wait_for(proc.communicate(), RPC_TIMEOUT * 3)
+    except asyncio.TimeoutError as exc:
+        raise HerdrUnavailable("herdr did not answer in time") from exc
+    except OSError as exc:
+        raise HerdrUnavailable(f"cannot run herdr: {exc}") from exc
+    try:
+        msg = json.loads(out.decode("utf-8", "replace").strip().splitlines()[-1])
+    except (ValueError, IndexError) as exc:
+        raise HerdrUnavailable("herdr returned no JSON (is it running?)") from exc
+    return _unwrap(msg)
+
+
 async def _connect():
     if not hasattr(asyncio, "open_unix_connection"):
         raise HerdrUnavailable("unix sockets are not available on this platform")
@@ -83,6 +143,8 @@ def _unwrap(msg: dict) -> dict:
 
 
 async def rpc(method: str, params: Optional[dict] = None) -> dict:
+    if _use_cli():
+        return await _rpc_cli(method, params or {})
     reader, writer = await _connect()
     try:
         writer.write((json.dumps({"id": "kh", "method": method, "params": params or {}}) + "\n").encode())
@@ -99,6 +161,8 @@ async def rpc(method: str, params: Optional[dict] = None) -> dict:
 
 async def subscribe(types: list[str]) -> AsyncIterator[dict]:
     """Yield event envelopes (``{"event": ..., "data": ...}``) until the connection ends."""
+    if _use_cli():
+        raise HerdrUnavailable("event subscriptions need the herdr socket")
     reader, writer = await _connect()
     try:
         req = {"id": "kh-sub", "method": "events.subscribe",
