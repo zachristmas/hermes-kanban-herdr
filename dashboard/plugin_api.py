@@ -117,17 +117,47 @@ def cli_args(method: str, params: dict) -> list[str]:
     raise HerdrUnavailable(f"{method} is not available without the herdr socket")
 
 
-async def _run_cli(cmd: list, timeout: float, stderr: bool = True) -> tuple[int, bytes, bytes]:
+def _remote_env(nt: Optional[bool] = None) -> Optional[dict]:
+    """Environment for a ``herdr --machine`` call. Windows OpenSSH (9.5) stalls in the authentication step
+    whenever its stdin is a pipe and the process has no interactive desktop, which is exactly how the
+    dashboard (a boot-time service) starts it, so Herdr's remote probes time out. Git for Windows ships a
+    newer ``ssh.exe`` without that problem; put it first on PATH for these calls. Set
+    KANBAN_HERDR_SSH_DIR to another directory holding ssh.exe, or to an empty string to turn this off."""
+    if nt is None:
+        nt = os.name == "nt"
+    if not nt:
+        return None
+    folder = os.environ.get("KANBAN_HERDR_SSH_DIR", r"C:\Program Files\Git\usr\bin")
+    if not folder or not os.path.isfile(os.path.join(folder, "ssh.exe")):
+        return None
+    env = dict(os.environ)
+    env["PATH"] = folder + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _kill_tree(proc: "subprocess.Popen") -> None:
+    """Stop herdr and the ssh helpers it started (on Windows killing the parent alone leaves them running)."""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    proc.kill()
+
+
+async def _run_cli(cmd: list, timeout: float, stderr: bool = True, env: Optional[dict] = None) -> tuple[int, bytes, bytes]:
     """Run a command in a worker thread. asyncio subprocesses raise NotImplementedError on the selector
-    event loop the Windows dashboard runs on, so they can't be used here. On timeout the process is killed
-    and its pipes are dropped without waiting: ``herdr --machine`` leaves helper processes holding them."""
+    event loop the Windows dashboard runs on, so they can't be used here. On timeout the process tree is
+    killed and its pipes are dropped without waiting: ``herdr --machine`` leaves helper processes holding them."""
     def go():
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, env=env,
                                 stderr=subprocess.PIPE if stderr else subprocess.DEVNULL)
         try:
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            proc.kill()
+            _kill_tree(proc)
             for pipe in (proc.stdout, proc.stderr):
                 try:
                     pipe and pipe.close()
@@ -141,7 +171,8 @@ async def _run_cli(cmd: list, timeout: float, stderr: bool = True) -> tuple[int,
 async def _rpc_cli(method: str, params: dict, machine: Optional[str] = None) -> dict:
     cmd = herdr_command() + (["--machine", machine] if machine else []) + cli_args(method, params)
     try:
-        returncode, out, err = await _run_cli(cmd, REMOTE_TIMEOUT if machine else RPC_TIMEOUT * 3)
+        returncode, out, err = await _run_cli(cmd, REMOTE_TIMEOUT if machine else RPC_TIMEOUT * 3,
+                                              env=_remote_env() if machine else None)
     except asyncio.TimeoutError as exc:
         raise HerdrUnavailable("herdr did not answer in time") from exc
     except OSError as exc:

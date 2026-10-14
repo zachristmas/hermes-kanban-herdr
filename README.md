@@ -69,6 +69,14 @@ no unix sockets, so the plugin runs the `herdr` CLI instead (found on `PATH`, un
 `~/.herdr/packages/standalone/releases/*/`, or via `HERDR_BIN`). If Herdr can't be reached, the
 section says so.
 
+**Windows and saved machines.** Windows OpenSSH (9.5) stalls during authentication when its stdin is a pipe
+and the process has no interactive desktop, which is how a boot-time dashboard service starts it; Herdr's
+remote probes then time out ("server status probe timed out") even though `ssh host` works in a terminal.
+For remote calls the plugin therefore puts Git for Windows' newer `ssh.exe` first on `PATH` when it finds
+`C:\Program Files\Git\usr\bin\ssh.exe`. Point `KANBAN_HERDR_SSH_DIR` at another folder holding `ssh.exe`,
+or set it to an empty string to use whatever `ssh` is on `PATH`. A remote that still doesn't answer is
+named as not reachable and doesn't hold up the local panes.
+
 ## Other machines
 
 Panes on the machines saved in Herdr (`herdr machine list`, the ones `herdr --machine <label>`

@@ -333,6 +333,27 @@ class RemoteMachineTests(Base):
         self.assertNotEqual(self.client.post(self.url("/link"), json={"task": "t_rem", "pane_id": "bad.id~w1:p1"}).status_code, 200)
 
 
+class RemoteEnvTests(unittest.TestCase):
+    """Windows runs remote herdr calls with Git's ssh.exe first on PATH (Windows OpenSSH hangs on piped stdin)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="khssh-")
+        Path(self.dir, "ssh.exe").write_text("")
+        self.addCleanup(os.environ.pop, "KANBAN_HERDR_SSH_DIR", None)
+        os.environ["KANBAN_HERDR_SSH_DIR"] = self.dir
+
+    def test_ssh_dir_goes_first_on_windows(self):
+        env = api._remote_env(nt=True)
+        self.assertTrue(env["PATH"].startswith(self.dir + os.pathsep))
+
+    def test_untouched_elsewhere_or_when_disabled_or_missing(self):
+        self.assertIsNone(api._remote_env(nt=False))
+        os.environ["KANBAN_HERDR_SSH_DIR"] = ""
+        self.assertIsNone(api._remote_env(nt=True))
+        os.environ["KANBAN_HERDR_SSH_DIR"] = os.path.join(self.dir, "nope")
+        self.assertIsNone(api._remote_env(nt=True))
+
+
 class CleanTextTests(unittest.TestCase):
     def test_keeps_tail_and_strips_controls(self):
         self.assertEqual(api.clean_text("a\r\nb\rc\x00"), "a\nb\nc")
