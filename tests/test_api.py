@@ -262,6 +262,9 @@ class RemoteMachineTests(Base):
         api._remote_cache.clear()
         api.REMOTE_POLL_SECONDS = 0.05
         api.REMOTE_LIST_TTL = 0.0
+        api.REMOTE_FAIL_TTL = 0.0
+        api.REMOTE_WAIT = 3.0
+        api._remote_tasks.clear()
 
     def tearDown(self):
         self.remote.stop()
@@ -275,6 +278,25 @@ class RemoteMachineTests(Base):
         self.assertEqual([(p["pane_id"], p["machine"]) for p in remote], [("m1~wR:p1", "Remote box")])
         self.assertEqual(r["unreachable"], ["Down box"])  # the disabled one is not even tried
         self.assertTrue(any(p["pane_id"] == "w1:p1" for p in r["panes"]))  # local panes still listed
+
+    def test_hanging_machine_does_not_hold_up_the_list(self):
+        os.environ["HERDR_STUB_HANG_m1"] = "1"
+        self.addCleanup(os.environ.pop, "HERDR_STUB_HANG_m1", None)
+        api.REMOTE_TIMEOUT = 1.0
+        api.REMOTE_WAIT = 0.3
+        api.REMOTE_FAIL_TTL = 60.0
+        self.addCleanup(setattr, api, "REMOTE_TIMEOUT", 15.0)
+        with self.client as client:  # one event loop for both calls, like the real dashboard
+            t0 = time.time()
+            r = client.get(self.url("/all-panes")).json()
+            self.assertLess(time.time() - t0, 2.0)
+            self.assertTrue(any(p["pane_id"] == "w1:p1" for p in r["panes"]))  # local panes still listed
+            self.assertIn("Remote box", r["unreachable"])
+            time.sleep(1.5)  # the background fetch hits its timeout (and must not hang on the helper's pipes)
+            t0 = time.time()
+            r = client.get(self.url("/all-panes")).json()
+            self.assertLess(time.time() - t0, 0.3)  # remembered as down: answered at once
+            self.assertIn("Remote box", r["unreachable"])
 
     def test_link_remote_pane_tags_it_on_that_machine(self):
         r = self.client.post(self.url("/link"), json={"task": "t_rem", "board": "gsd", "pane_id": "m1~wR:p1"})

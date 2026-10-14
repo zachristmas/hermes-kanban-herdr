@@ -9,6 +9,11 @@ a = sys.argv[1:]
 sock = os.environ["HERDR_SOCKET_PATH"]
 if a[:2] == ["--machine", a[1]] and a[0] == "--machine":
     # Another saved machine: its socket comes from HERDR_STUB_MACHINE_<id>; unset means it is down.
+    if os.environ.get("HERDR_STUB_HANG_" + a[1]):
+        import subprocess
+        import time
+        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])  # inherits stdout/stderr like herdr's bridge
+        time.sleep(30)
     sock = os.environ.get("HERDR_STUB_MACHINE_" + a[1], "")
     a = a[2:]
 if a[:2] == ["machine", "list"]:

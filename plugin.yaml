@@ -1,5 +1,5 @@
 name: kanban-herdr
-version: "0.3.1"
+version: "0.3.2"
 description: "Shows the Herdr terminal panes linked to a kanban task, with a live read-only view of the open pane."
 author: Zach Christmas
 provides_tools:

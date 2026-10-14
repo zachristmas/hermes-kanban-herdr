@@ -51,6 +51,8 @@ REMOTE_POLL_SECONDS = 1.5 # panes on another machine are read over SSH, so poll 
 MACHINES_TTL = 60.0       # how long the saved-machine list is reused
 REMOTE_LIST_TTL = 4.0     # how long a remote pane list is reused (drawers poll every 5 s)
 REMOTE_TIMEOUT = 15.0
+REMOTE_WAIT = 3.0         # longest a drawer request waits on any one saved machine
+REMOTE_FAIL_TTL = 30.0    # how long a machine that failed is left alone
 MAX_STREAMS = 4           # live views at once, across all viewers
 KEEP_LINKS = 20
 KEEP_SEEN = 12
@@ -117,14 +119,22 @@ def cli_args(method: str, params: dict) -> list[str]:
 
 async def _run_cli(cmd: list, timeout: float, stderr: bool = True) -> tuple[int, bytes, bytes]:
     """Run a command in a worker thread. asyncio subprocesses raise NotImplementedError on the selector
-    event loop the Windows dashboard runs on, so they can't be used here."""
+    event loop the Windows dashboard runs on, so they can't be used here. On timeout the process is killed
+    and its pipes are dropped without waiting: ``herdr --machine`` leaves helper processes holding them."""
     def go():
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE if stderr else subprocess.DEVNULL)
         try:
-            done = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE if stderr else subprocess.DEVNULL, timeout=timeout)
+            out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            for pipe in (proc.stdout, proc.stderr):
+                try:
+                    pipe and pipe.close()
+                except Exception:  # noqa: BLE001
+                    pass
             raise asyncio.TimeoutError() from exc
-        return done.returncode, done.stdout or b"", done.stderr or b""
+        return proc.returncode, out or b"", err or b""
     return await asyncio.to_thread(go)
 
 
@@ -275,16 +285,42 @@ async def saved_machines() -> list[dict]:
     return items
 
 
-async def _remote_panes(m: dict) -> list[dict]:
-    cached = _remote_cache.get(m["id"])
-    if cached and time.time() - cached[0] < REMOTE_LIST_TTL:
-        return cached[1]
-    panes = (await rpc("pane.list", machine=m["id"])).get("panes") or []
+_remote_tasks: dict[str, "asyncio.Future"] = {}
+
+
+async def _fetch_remote(m: dict) -> list[dict]:
+    try:
+        panes = (await rpc("pane.list", machine=m["id"])).get("panes") or []
+    except Exception:
+        _remote_cache[m["id"]] = (time.time(), [], False)
+        raise
     for p in panes:
         p["pane_id"] = f'{m["id"]}~{p.get("pane_id")}'
         p["_machine"] = m["label"]
-    _remote_cache[m["id"]] = (time.time(), panes)
+    _remote_cache[m["id"]] = (time.time(), panes, True)
     return panes
+
+
+async def _remote_panes(m: dict) -> list[dict]:
+    """One machine's panes. A slow or dead machine must not hold up the drawer: the fetch runs once in the
+    background, a failure is remembered for REMOTE_FAIL_TTL, and the caller waits at most REMOTE_WAIT."""
+    cached = _remote_cache.get(m["id"])
+    if cached:
+        age = time.time() - cached[0]
+        if cached[2] and age < REMOTE_LIST_TTL:
+            return cached[1]
+        if not cached[2] and age < REMOTE_FAIL_TTL:
+            raise HerdrUnavailable("machine did not answer recently")
+    task = _remote_tasks.get(m["id"])
+    if task is None or task.done():
+        task = _remote_tasks[m["id"]] = asyncio.ensure_future(_fetch_remote(m))
+        task.add_done_callback(lambda f: f.cancelled() or f.exception())  # retrieved; errors are cached above
+    done, _ = await asyncio.wait({task}, timeout=REMOTE_WAIT)
+    if task in done:
+        return task.result()
+    if cached and cached[2]:
+        return cached[1]  # stale beats nothing while the refresh is still running
+    raise HerdrUnavailable("machine is slow to answer")
 
 
 async def list_panes() -> list[dict]:

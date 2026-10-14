@@ -1,6 +1,6 @@
 {
   "name": "hermes-kanban-herdr",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
   "description": "Herdr panes linked to a Hermes kanban task, with a live read-only terminal view",
