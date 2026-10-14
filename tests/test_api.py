@@ -307,6 +307,20 @@ class RemoteMachineTests(Base):
             self.assertLess(time.time() - t0, 0.3)
             self.assertIn("Remote box", r["unreachable"])
 
+    def test_stale_remote_list_is_returned_while_it_refreshes(self):
+        with self.client as client:
+            first = client.get(self.url("/all-panes")).json()
+            self.assertIn("m1~wR:p1", [p["pane_id"] for p in first["panes"]])
+            os.environ["HERDR_STUB_HANG_m1"] = "1"  # now the machine stops answering
+            self.addCleanup(os.environ.pop, "HERDR_STUB_HANG_m1", None)
+            api.REMOTE_TIMEOUT = 1.0
+            self.addCleanup(setattr, api, "REMOTE_TIMEOUT", 15.0)
+            api._remote_cache["m1"] = (time.time() - 100, api._remote_cache["m1"][1], True)  # expired
+            t0 = time.time()
+            r = client.get(self.url("/all-panes")).json()
+            self.assertLess(time.time() - t0, 1.0)
+            self.assertIn("m1~wR:p1", [p["pane_id"] for p in r["panes"]])  # stale beats nothing
+
     def test_link_remote_pane_tags_it_on_that_machine(self):
         r = self.client.post(self.url("/link"), json={"task": "t_rem", "board": "gsd", "pane_id": "m1~wR:p1"})
         self.assertEqual(r.status_code, 200, r.text)

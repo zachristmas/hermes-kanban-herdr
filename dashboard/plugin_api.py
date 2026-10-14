@@ -52,6 +52,7 @@ MACHINES_TTL = 60.0       # how long the saved-machine list is reused
 REMOTE_LIST_TTL = 4.0     # how long a remote pane list is reused (drawers poll every 5 s)
 REMOTE_TIMEOUT = 15.0
 REMOTE_WAIT = 3.0         # longest a drawer request waits on any one saved machine
+REMOTE_STALE_WAIT = 0.3   # how long a refresh of an already-known remote list is waited on
 REMOTE_FAIL_TTL = 30.0    # how long a machine that failed is left alone
 MAX_STREAMS = 4           # live views at once, across all viewers
 KEEP_LINKS = 20
@@ -347,7 +348,10 @@ async def _remote_panes(m: dict) -> list[dict]:
         task = _remote_tasks[m["id"]] = asyncio.ensure_future(_fetch_remote(m))
         task.add_done_callback(lambda f: f.cancelled() or f.exception())  # retrieved; errors are cached above
     # Only wait for a machine that has not failed before; one that did is skipped until its retry lands.
-    done, _ = await asyncio.wait({task}, timeout=REMOTE_WAIT if (not cached or cached[2]) else 0)
+    # First look at a machine: wait up to REMOTE_WAIT. Known-good but stale: answer with the stale list after a
+    # moment and let the refresh land for the next poll. Failed before: don't wait.
+    budget = REMOTE_WAIT if not cached else (REMOTE_STALE_WAIT if cached[2] else 0)
+    done, _ = await asyncio.wait({task}, timeout=budget)
     if task in done:
         return task.result()
     if cached and cached[2]:
