@@ -30,5 +30,11 @@ else:
 
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect(os.environ["HERDR_SOCKET_PATH"])
-s.sendall((json.dumps({"id": "cli", "method": method, "params": params}) + "\n").encode())
-print(s.makefile().readline().strip())
+s.sendall((json.dumps({"id": "cli:stub", "method": method, "params": params}) + "\n").encode())
+reply = s.makefile().readline().strip()
+msg = json.loads(reply)
+if method == "pane.read" and "error" not in msg:
+    sys.stdout.write(msg["result"]["read"]["text"])  # the real CLI prints bare text for a read
+else:
+    print(reply)
+    sys.exit(1 if "error" in msg else 0)

@@ -119,10 +119,20 @@ async def _rpc_cli(method: str, params: dict) -> dict:
         raise HerdrUnavailable("herdr did not answer in time") from exc
     except OSError as exc:
         raise HerdrUnavailable(f"cannot run herdr: {exc}") from exc
+    text = out.decode("utf-8", "replace")
+    msg = None
     try:
-        msg = json.loads(out.decode("utf-8", "replace").strip().splitlines()[-1])
-    except (ValueError, IndexError) as exc:
-        raise HerdrUnavailable("herdr returned no JSON (is it running?)") from exc
+        parsed = json.loads(text.strip().splitlines()[-1]) if text.strip() else None
+        if isinstance(parsed, dict) and str(parsed.get("id", "")).startswith("cli:"):
+            msg = parsed
+    except ValueError:
+        pass
+    if method == "pane.read" and (msg is None or "error" not in msg):
+        # ``herdr pane read`` prints the terminal text itself, not a JSON envelope.
+        return {"read": {"pane_id": params.get("pane_id"), "source": params.get("source"), "format": "text",
+                         "text": text, "revision": None, "truncated": False}}
+    if msg is None:
+        raise HerdrUnavailable("herdr returned no JSON (is it running?)")
     return _unwrap(msg)
 
 
