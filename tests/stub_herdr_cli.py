@@ -41,8 +41,10 @@ s.connect(sock)
 s.sendall((json.dumps({"id": "cli:stub", "method": method, "params": params}) + "\n").encode())
 reply = s.makefile().readline().strip()
 msg = json.loads(reply)
-if method == "pane.read" and "error" not in msg:
-    sys.stdout.write(msg["result"]["read"]["text"])  # the real CLI prints bare text for a read
-else:
+if "error" in msg:
+    sys.stderr.write(reply + "\n")  # the real CLI reports errors on stderr
+    sys.exit(1)
+if method == "pane.read":
+    sys.stdout.write(msg["result"]["read"]["text"])  # bare text, not an envelope
+elif method != "pane.report_metadata":  # and says nothing at all when a metadata update succeeds
     print(reply)
-    sys.exit(1 if "error" in msg else 0)

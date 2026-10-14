@@ -33,6 +33,25 @@ panes working on a task, one open at a time, with a live, read-only view of the 
 
 Tokens are a hint for display, not authorization.
 
+## Agent tool: `kanban_herdr_link`
+
+Hermes agents that dispatch work get a tool, so they tag a pane without composing the CLI command:
+
+```
+kanban_herdr_link(action="link", pane_id="w1:p2", task_id="t_1a2b3c4d", board="connect")
+```
+
+- `link` sets the tag and reads it back (`verified: true`); a stale board from an earlier card is
+  cleared when no board is given. `unlink` removes it only if it points at that task. `show` reads it.
+- `machine` (a saved machine's label or id) reaches a pane on another machine.
+- Bad ids are refused before anything runs, an unknown pane gives `pane_not_found`, and the tool
+  never raises. It only sets or clears the two tokens; it never sends input to a pane or closes one.
+- It appears when `kanban-herdr` is enabled and the `herdr` command is found. The toolset is
+  `kanban_herdr`; plugin toolsets are on by default. Restart the gateway or open a new session to
+  pick it up.
+
+Agents that aren't Hermes (Claude Code, Codex) can run the CLI command from "How panes get linked".
+
 ## Install
 
 ```
@@ -76,7 +95,7 @@ same API shapes, because the CLI prints the same JSON the socket returns.
 ## Testing
 
 ```
-python3 -m unittest discover -s tests      # API tests against a fake Herdr socket, run over both transports (48)
+python3 -m unittest discover -s tests      # API tests against a fake Herdr socket, run over both transports (57)
 ```
 
 Browser tests (Playwright, `data-testid` selectors) need a dashboard with the plugin enabled

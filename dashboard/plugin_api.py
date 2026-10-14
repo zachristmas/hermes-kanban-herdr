@@ -119,24 +119,30 @@ async def _rpc_cli(method: str, params: dict, machine: Optional[str] = None) -> 
     try:
         proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL,
                                                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        out, _err = await asyncio.wait_for(proc.communicate(), REMOTE_TIMEOUT if machine else RPC_TIMEOUT * 3)
+        out, err = await asyncio.wait_for(proc.communicate(), REMOTE_TIMEOUT if machine else RPC_TIMEOUT * 3)
     except asyncio.TimeoutError as exc:
         raise HerdrUnavailable("herdr did not answer in time") from exc
     except OSError as exc:
         raise HerdrUnavailable(f"cannot run herdr: {exc}") from exc
     text = out.decode("utf-8", "replace")
+    # The CLI prints results as a JSON envelope on stdout, errors on stderr, and nothing at all when a
+    # metadata update succeeds.
     msg = None
-    try:
-        parsed = json.loads(text.strip().splitlines()[-1]) if text.strip() else None
-        if isinstance(parsed, dict) and str(parsed.get("id", "")).startswith("cli:"):
+    for stream in (text, err.decode("utf-8", "replace")):
+        try:
+            parsed = json.loads(stream.strip().splitlines()[-1]) if stream.strip() else None
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict) and str(parsed.get("id", "")).startswith("cli:") and ("result" in parsed or "error" in parsed):
             msg = parsed
-    except ValueError:
-        pass
+            break
     if method == "pane.read" and (msg is None or "error" not in msg):
         # ``herdr pane read`` prints the terminal text itself, not a JSON envelope.
         return {"read": {"pane_id": params.get("pane_id"), "source": params.get("source"), "format": "text",
                          "text": text, "revision": None, "truncated": False}}
     if msg is None:
+        if method == "pane.report_metadata" and proc.returncode == 0 and not text.strip():
+            return {}
         raise HerdrUnavailable("herdr returned no JSON (is it running?)")
     return _unwrap(msg)
 
