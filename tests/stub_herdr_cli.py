@@ -6,6 +6,14 @@ import socket
 import sys
 
 a = sys.argv[1:]
+sock = os.environ["HERDR_SOCKET_PATH"]
+if a[:2] == ["--machine", a[1]] and a[0] == "--machine":
+    # Another saved machine: its socket comes from HERDR_STUB_MACHINE_<id>; unset means it is down.
+    sock = os.environ.get("HERDR_STUB_MACHINE_" + a[1], "")
+    a = a[2:]
+if a[:2] == ["machine", "list"]:
+    print(os.environ.get("HERDR_STUB_MACHINES", ""))
+    sys.exit(0)
 params, method = {}, None
 if a[:2] == ["pane", "list"]:
     method = "pane.list"
@@ -29,7 +37,7 @@ else:
     sys.exit(1)
 
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(os.environ["HERDR_SOCKET_PATH"])
+s.connect(sock)
 s.sendall((json.dumps({"id": "cli:stub", "method": method, "params": params}) + "\n").encode())
 reply = s.makefile().readline().strip()
 msg = json.loads(reply)

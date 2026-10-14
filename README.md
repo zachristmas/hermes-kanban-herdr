@@ -48,6 +48,14 @@ no unix sockets, so the plugin runs the `herdr` CLI instead (found on `PATH`, un
 `~/.herdr/packages/standalone/releases/*/`, or via `HERDR_BIN`). If Herdr can't be reached, the
 section says so.
 
+## Other machines
+
+Panes on the machines saved in Herdr (`herdr machine list`, the ones `herdr --machine <label>`
+reaches) are listed too, labelled with the machine name, and can be linked and watched the same
+way. They are reached through the `herdr` CLI over SSH, so their live view polls about every
+1.5 s, and a machine that doesn't answer is named in the section rather than hiding the rest.
+Disabled machines are skipped. Panes are referenced as `<machine id>~<pane id>`.
+
 ## Security notes
 
 - Pane text can contain anything the terminal printed, including secrets. The stream is served
@@ -66,7 +74,7 @@ same API shapes, because the CLI prints the same JSON the socket returns.
 ## Testing
 
 ```
-python3 -m unittest discover -s tests      # API tests against a fake Herdr socket, run over both transports (44)
+python3 -m unittest discover -s tests      # API tests against a fake Herdr socket, run over both transports (48)
 ```
 
 Browser tests (Playwright, `data-testid` selectors) need a dashboard with the plugin enabled
@@ -77,6 +85,10 @@ python3 tests/fake_herdr.py /tmp/khd-fake.sock &
 HERDR_SOCKET_PATH=/tmp/khd-fake.sock hermes dashboard --port 9229 --no-open &
 FAKE_HERDR_SOCK=/tmp/khd-fake.sock npm run e2e
 ```
+
+The remote-machine browser test needs a second fake registered as a saved machine; it is skipped
+unless `HERDR_E2E_REMOTE=1` (see the `HERDR_BIN` / `HERDR_STUB_MACHINE*` variables in
+`tests/stub_herdr_cli.py`).
 
 Unix socket paths are length-limited on macOS; keep the fake socket path short.
 

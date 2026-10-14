@@ -241,6 +241,61 @@ class CliArgsTests(unittest.TestCase):
             api.cli_args("pane.send_text", {"pane_id": "w1:p1"})
 
 
+class RemoteMachineTests(Base):
+    """Panes on other saved machines (herdr --machine <id>) show up beside the local ones."""
+
+    def setUp(self):
+        super().setUp()
+        self.sock2 = os.path.join(self.tmp, "r.sock")
+        self.remote = FakeHerdrThread(self.sock2).start()
+        self.remote.add("wR:p1", title="windows exec", agent="codex", status="working", text="remote one\n")
+        os.environ["HERDR_BIN"] = f'{sys.executable} {HERE / "stub_herdr_cli.py"}'
+        os.environ["HERDR_STUB_MACHINES"] = "m1\tRemote box\thost1\tdefault\tenabled\ndead\tDown box\thost2\tdefault\tenabled\noff\tOff box\thost3\tdefault\tdisabled"
+        os.environ["HERDR_STUB_MACHINE_m1"] = self.sock2
+        api._machines_cache["at"] = 0.0
+        api._remote_cache.clear()
+        api.REMOTE_POLL_SECONDS = 0.05
+        api.REMOTE_LIST_TTL = 0.0
+
+    def tearDown(self):
+        self.remote.stop()
+        for k in ("HERDR_BIN", "HERDR_STUB_MACHINES", "HERDR_STUB_MACHINE_m1"):
+            os.environ.pop(k, None)
+        super().tearDown()
+
+    def test_remote_panes_are_listed_with_their_machine(self):
+        r = self.client.get(self.url("/all-panes")).json()
+        remote = [p for p in r["panes"] if p["machine"]]
+        self.assertEqual([(p["pane_id"], p["machine"]) for p in remote], [("m1~wR:p1", "Remote box")])
+        self.assertEqual(r["unreachable"], ["Down box"])  # the disabled one is not even tried
+        self.assertTrue(any(p["pane_id"] == "w1:p1" for p in r["panes"]))  # local panes still listed
+
+    def test_link_remote_pane_tags_it_on_that_machine(self):
+        r = self.client.post(self.url("/link"), json={"task": "t_rem", "board": "gsd", "pane_id": "m1~wR:p1"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.remote.tokens("wR:p1"), {"kanban_task": "t_rem", "kanban_board": "gsd"})
+        self.assertEqual(self.herdr.tokens("w1:p1"), {"kanban_task": "t_a1", "kanban_board": "gsd"})  # local untouched
+        panes = self.client.get(self.url("/panes"), params={"task": "t_rem", "board": "gsd"}).json()["panes"]
+        self.assertEqual([p["pane_id"] for p in panes], ["m1~wR:p1"])
+        self.assertEqual(self.client.post(self.url("/unlink"), json={"task": "t_rem", "board": "gsd", "pane_id": "m1~wR:p1"}).status_code, 200)
+        self.assertEqual(self.remote.tokens("wR:p1"), {})
+
+    def test_remote_stream_follows_new_output(self):
+        with self.client.websocket_connect(self.url("/stream") + "?pane=m1~wR:p1") as ws:
+            self.assertIn("remote one", ws.receive_json()["text"])
+            self.remote.append("wR:p1", "remote two\n")
+            for _ in range(40):
+                m = ws.receive_json()
+                if m["type"] == "snapshot" and "remote two" in m["text"]:
+                    break
+            else:
+                self.fail("no live update from the remote pane")
+
+    def test_bad_machine_reference_is_refused(self):
+        self.assertEqual(self.client.post(self.url("/link"), json={"task": "t_rem", "pane_id": "a b~w1"}).status_code, 400)
+        self.assertNotEqual(self.client.post(self.url("/link"), json={"task": "t_rem", "pane_id": "bad.id~w1:p1"}).status_code, 200)
+
+
 class CleanTextTests(unittest.TestCase):
     def test_keeps_tail_and_strips_controls(self):
         self.assertEqual(api.clean_text("a\r\nb\rc\x00"), "a\nb\nc")

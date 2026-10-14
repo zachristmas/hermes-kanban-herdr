@@ -97,7 +97,7 @@
   }
 
   function statusText(pane) {
-    return [pane.agent || "shell", pane.agent_status || "unknown"].join(" · ");
+    return [pane.machine, pane.agent || "shell", pane.agent_status || "unknown"].filter(Boolean).join(" · ");
   }
 
   function render(p, r) {
@@ -109,6 +109,9 @@
       p.note.hidden = false;
     } else if (!panes.length && !closed.length) {
       p.note.textContent = "No Herdr pane is linked to this task. Tag one with a kanban_task token, or use “link a pane”.";
+      p.note.hidden = false;
+    } else if (r.unreachable && r.unreachable.length) {
+      p.note.textContent = "Not reachable: " + r.unreachable.join(", ") + ". Their panes aren't listed.";
       p.note.hidden = false;
     } else {
       p.note.hidden = true;
@@ -169,7 +172,7 @@
     row.dot.setAttribute("data-status", pane.agent_status || "unknown");
     row.title.textContent = pane.title || pane.pane_id;
     row.title.title = (pane.cwd || "") + "  " + pane.pane_id;
-    row.meta.textContent = statusText(pane) + " · " + pane.pane_id;
+    row.meta.textContent = statusText(pane) + " · " + pane.pane_id.split("~").pop();
   }
 
   function makeClosedRow(c) {

@@ -104,3 +104,23 @@ test("phone width: section fits and pane opens", async ({ page }) => {
   const over = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
   expect(over).toBe(false);
 });
+
+// Needs a second fake Herdr registered as a saved machine named "Remote box" (see README, "Testing").
+test("panes on another saved machine can be linked, labelled and streamed", async ({ page }) => {
+  test.skip(!process.env.HERDR_E2E_REMOTE, "set HERDR_E2E_REMOTE=1 with a saved machine configured");
+  page.on("dialog", (d) => d.accept());
+  await open(page);
+  await page.locator('[data-testid="khd-link"]').click();
+  const pick = page.locator('[data-testid="khd-pick"]').filter({ hasText: "Remote box" }).first();
+  await expect(pick).toBeVisible();
+  await expect(pick).toContainText("windows exec");
+  await pick.click();
+  const row = page.locator('[data-testid="khd-pane"]').filter({ hasText: "windows exec" });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText("Remote box");
+  await row.locator('[data-testid="khd-pane-head"]').click();
+  await expect(row.locator('[data-testid="khd-term"]')).toContainText("remote one", { timeout: 10000 });
+  await expect(row.locator('[data-testid="khd-live"]')).toHaveAttribute("data-state", "live");
+  await row.locator('[data-testid="khd-unlink"]').click();
+  await expect(row).toHaveCount(0);
+});

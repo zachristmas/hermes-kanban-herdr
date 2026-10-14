@@ -37,7 +37,8 @@ SOURCE = "kanban-link"
 TOKEN_TASK = "kanban_task"
 TOKEN_BOARD = "kanban_board"
 
-_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_ID_RE = re.compile(r"^[A-Za-z0-9_.:~-]{1,100}$")  # "~" joins a saved machine id to a pane id
+_MACHINE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 READ_LINES = 500          # lines of scrollback sent with each snapshot
@@ -45,6 +46,10 @@ MAX_TEXT = 256 * 1024     # characters kept per snapshot (the tail)
 COALESCE_SECONDS = 0.12   # merge bursts of pane updates into one read
 RESYNC_SECONDS = 10.0     # re-read even without an event, to repair any drift
 POLL_SECONDS = 0.7        # fallback when the event subscription is unavailable
+REMOTE_POLL_SECONDS = 1.5 # panes on another machine are read over SSH, so poll more gently
+MACHINES_TTL = 60.0       # how long the saved-machine list is reused
+REMOTE_LIST_TTL = 4.0     # how long a remote pane list is reused (drawers poll every 5 s)
+REMOTE_TIMEOUT = 15.0
 MAX_STREAMS = 4           # live views at once, across all viewers
 KEEP_LINKS = 20
 KEEP_SEEN = 12
@@ -109,12 +114,12 @@ def cli_args(method: str, params: dict) -> list[str]:
     raise HerdrUnavailable(f"{method} is not available without the herdr socket")
 
 
-async def _rpc_cli(method: str, params: dict) -> dict:
-    cmd = herdr_command() + cli_args(method, params)
+async def _rpc_cli(method: str, params: dict, machine: Optional[str] = None) -> dict:
+    cmd = herdr_command() + (["--machine", machine] if machine else []) + cli_args(method, params)
     try:
         proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL,
                                                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        out, _err = await asyncio.wait_for(proc.communicate(), RPC_TIMEOUT * 3)
+        out, _err = await asyncio.wait_for(proc.communicate(), REMOTE_TIMEOUT if machine else RPC_TIMEOUT * 3)
     except asyncio.TimeoutError as exc:
         raise HerdrUnavailable("herdr did not answer in time") from exc
     except OSError as exc:
@@ -152,9 +157,25 @@ def _unwrap(msg: dict) -> dict:
     return msg.get("result") or {}
 
 
-async def rpc(method: str, params: Optional[dict] = None) -> dict:
+def split_ref(ref: str) -> tuple[Optional[str], str]:
+    """A pane on another saved machine is ``<machine id>~<pane id>``; a local pane is just its id."""
+    machine, sep, pane = (ref or "").partition("~")
+    if not sep:
+        return None, ref
+    if not _MACHINE_RE.match(machine):
+        raise HerdrError("invalid_ref", "bad pane reference")
+    return machine, pane
+
+
+async def rpc(method: str, params: Optional[dict] = None, machine: Optional[str] = None) -> dict:
+    params = dict(params or {})
+    if params.get("pane_id"):
+        ref_machine, params["pane_id"] = split_ref(params["pane_id"])
+        machine = ref_machine or machine
+    if machine:
+        return await _rpc_cli(method, params, machine)  # other machines are reached through the herdr CLI
     if _use_cli():
-        return await _rpc_cli(method, params or {})
+        return await _rpc_cli(method, params)
     reader, writer = await _connect()
     try:
         writer.write((json.dumps({"id": "kh", "method": method, "params": params or {}}) + "\n").encode())
@@ -210,11 +231,69 @@ def public_pane(p: dict) -> dict:
         "revision": p.get("revision"),
         "task": tokens.get(TOKEN_TASK),
         "board": tokens.get(TOKEN_BOARD),
+        "machine": p.get("_machine"),
     }
 
 
+_machines_cache: dict[str, Any] = {"at": 0.0, "items": []}
+_remote_cache: dict[str, tuple[float, list]] = {}
+unreachable: list[str] = []  # labels of saved machines that did not answer on the last listing
+
+
+async def saved_machines() -> list[dict]:
+    """Enabled SSH machines saved in Herdr (``herdr machine list``: id, label, host, session, state)."""
+    if time.time() - _machines_cache["at"] < MACHINES_TTL:
+        return _machines_cache["items"]
+    items: list[dict] = []
+    try:
+        proc = await asyncio.create_subprocess_exec(*herdr_command(), "machine", "list", stdin=asyncio.subprocess.DEVNULL,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), RPC_TIMEOUT * 3)
+        for line in out.decode("utf-8", "replace").splitlines():
+            cols = line.split("\t")
+            if len(cols) >= 5 and cols[4].strip() == "enabled" and _MACHINE_RE.match(cols[0]):
+                items.append({"id": cols[0], "label": cols[1], "host": cols[2]})
+    except (OSError, asyncio.TimeoutError, HerdrUnavailable):
+        items = []
+    _machines_cache.update(at=time.time(), items=items)
+    return items
+
+
+async def _remote_panes(m: dict) -> list[dict]:
+    cached = _remote_cache.get(m["id"])
+    if cached and time.time() - cached[0] < REMOTE_LIST_TTL:
+        return cached[1]
+    panes = (await rpc("pane.list", machine=m["id"])).get("panes") or []
+    for p in panes:
+        p["pane_id"] = f'{m["id"]}~{p.get("pane_id")}'
+        p["_machine"] = m["label"]
+    _remote_cache[m["id"]] = (time.time(), panes)
+    return panes
+
+
 async def list_panes() -> list[dict]:
-    return (await rpc("pane.list")).get("panes") or []
+    """Panes on this machine plus every enabled saved machine. A machine that does not answer is skipped
+    (and named in ``unreachable``) rather than failing the whole list; only a dead local Herdr with no
+    reachable machine raises ``HerdrUnavailable``."""
+    local: list[dict] = []
+    local_error: Optional[HerdrUnavailable] = None
+    try:
+        local = (await rpc("pane.list")).get("panes") or []
+    except HerdrUnavailable as exc:
+        local_error = exc
+    machines = await saved_machines()
+    results = await asyncio.gather(*[_remote_panes(m) for m in machines], return_exceptions=True)
+    remote: list[dict] = []
+    bad: list[str] = []
+    for m, r in zip(machines, results):
+        if isinstance(r, list):
+            remote += r
+        else:
+            bad.append(m["label"])
+    unreachable[:] = bad
+    if local_error and not remote:
+        raise local_error
+    return local + remote
 
 
 # --- link store (manual links + recently seen panes) --------------------------
@@ -344,7 +423,7 @@ async def panes_for_task(task: str = Query(...), board: Optional[str] = Query(No
         store.update(remember)
     live_terms = {p.get("terminal_id") for p in panes}
     closed = [e for e in store.read()["seen"].get(key, []) if e.get("terminal_id") not in live_terms]
-    return {"available": True, "panes": matched, "closed": closed[-KEEP_SEEN:]}
+    return {"available": True, "panes": matched, "closed": closed[-KEEP_SEEN:], "unreachable": list(unreachable)}
 
 
 @router.get("/all-panes")
@@ -353,7 +432,7 @@ async def all_panes():
         panes = await list_panes()
     except HerdrUnavailable as exc:
         return {"available": False, "reason": str(exc), "panes": []}
-    return {"available": True, "panes": [public_pane(p) for p in panes]}
+    return {"available": True, "panes": [public_pane(p) for p in panes], "unreachable": list(unreachable)}
 
 
 class LinkBody(BaseModel):
@@ -448,6 +527,10 @@ def _ws_authorized(ws: WebSocket) -> bool:
 
 async def _watch(pane_id: str, dirty: asyncio.Event, status: dict) -> None:
     """Set ``dirty`` whenever the pane changes: from Herdr's events, or by polling if they are unavailable."""
+    if "~" in pane_id:  # another machine: no event stream, so tick and let the reader compare text
+        while True:
+            await asyncio.sleep(REMOTE_POLL_SECONDS)
+            dirty.set()
     try:
         async for ev in subscribe(["pane.updated"]):
             pane = (ev.get("data") or {}).get("pane") or {}
