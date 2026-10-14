@@ -297,6 +297,11 @@ class RemoteMachineTests(Base):
             r = client.get(self.url("/all-panes")).json()
             self.assertLess(time.time() - t0, 0.3)  # remembered as down: answered at once
             self.assertIn("Remote box", r["unreachable"])
+            api.REMOTE_FAIL_TTL = 0.0  # retry is due: it starts in the background but is not waited for
+            t0 = time.time()
+            r = client.get(self.url("/all-panes")).json()
+            self.assertLess(time.time() - t0, 0.3)
+            self.assertIn("Remote box", r["unreachable"])
 
     def test_link_remote_pane_tags_it_on_that_machine(self):
         r = self.client.post(self.url("/link"), json={"task": "t_rem", "board": "gsd", "pane_id": "m1~wR:p1"})

@@ -315,7 +315,8 @@ async def _remote_panes(m: dict) -> list[dict]:
     if task is None or task.done():
         task = _remote_tasks[m["id"]] = asyncio.ensure_future(_fetch_remote(m))
         task.add_done_callback(lambda f: f.cancelled() or f.exception())  # retrieved; errors are cached above
-    done, _ = await asyncio.wait({task}, timeout=REMOTE_WAIT)
+    # Only wait for a machine that has not failed before; one that did is skipped until its retry lands.
+    done, _ = await asyncio.wait({task}, timeout=REMOTE_WAIT if (not cached or cached[2]) else 0)
     if task in done:
         return task.result()
     if cached and cached[2]:
