@@ -21,6 +21,7 @@ import glob
 import re
 import shlex
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -114,12 +115,23 @@ def cli_args(method: str, params: dict) -> list[str]:
     raise HerdrUnavailable(f"{method} is not available without the herdr socket")
 
 
+async def _run_cli(cmd: list, timeout: float, stderr: bool = True) -> tuple[int, bytes, bytes]:
+    """Run a command in a worker thread. asyncio subprocesses raise NotImplementedError on the selector
+    event loop the Windows dashboard runs on, so they can't be used here."""
+    def go():
+        try:
+            done = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE if stderr else subprocess.DEVNULL, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise asyncio.TimeoutError() from exc
+        return done.returncode, done.stdout or b"", done.stderr or b""
+    return await asyncio.to_thread(go)
+
+
 async def _rpc_cli(method: str, params: dict, machine: Optional[str] = None) -> dict:
     cmd = herdr_command() + (["--machine", machine] if machine else []) + cli_args(method, params)
     try:
-        proc = await asyncio.create_subprocess_exec(*cmd, stdin=asyncio.subprocess.DEVNULL,
-                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        out, err = await asyncio.wait_for(proc.communicate(), REMOTE_TIMEOUT if machine else RPC_TIMEOUT * 3)
+        returncode, out, err = await _run_cli(cmd, REMOTE_TIMEOUT if machine else RPC_TIMEOUT * 3)
     except asyncio.TimeoutError as exc:
         raise HerdrUnavailable("herdr did not answer in time") from exc
     except OSError as exc:
@@ -141,7 +153,7 @@ async def _rpc_cli(method: str, params: dict, machine: Optional[str] = None) -> 
         return {"read": {"pane_id": params.get("pane_id"), "source": params.get("source"), "format": "text",
                          "text": text, "revision": None, "truncated": False}}
     if msg is None:
-        if method == "pane.report_metadata" and proc.returncode == 0 and not text.strip():
+        if method == "pane.report_metadata" and returncode == 0 and not text.strip():
             return {}
         raise HerdrUnavailable("herdr returned no JSON (is it running?)")
     return _unwrap(msg)
@@ -252,9 +264,7 @@ async def saved_machines() -> list[dict]:
         return _machines_cache["items"]
     items: list[dict] = []
     try:
-        proc = await asyncio.create_subprocess_exec(*herdr_command(), "machine", "list", stdin=asyncio.subprocess.DEVNULL,
-                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        out, _ = await asyncio.wait_for(proc.communicate(), RPC_TIMEOUT * 3)
+        _, out, _ = await _run_cli(herdr_command() + ["machine", "list"], RPC_TIMEOUT * 3, stderr=False)
         for line in out.decode("utf-8", "replace").splitlines():
             cols = line.split("\t")
             if len(cols) >= 5 and cols[4].strip() == "enabled" and _MACHINE_RE.match(cols[0]):

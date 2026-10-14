@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -204,6 +205,11 @@ class CliTransportMixin:
     """Run the same tests with the Herdr CLI as the transport (what Windows uses: no unix sockets in its Python)."""
 
     def setUp(self):
+        # The Windows dashboard runs on a selector event loop where asyncio subprocesses raise
+        # NotImplementedError; the CLI transport must not depend on them.
+        patcher = mock.patch.object(asyncio, "create_subprocess_exec", side_effect=NotImplementedError)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         os.environ["KANBAN_HERDR_TRANSPORT"] = "cli"
         os.environ["HERDR_BIN"] = f'{sys.executable} {HERE / "stub_herdr_cli.py"}'
         super().setUp()
