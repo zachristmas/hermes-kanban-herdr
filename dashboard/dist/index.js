@@ -241,11 +241,34 @@
     row.body.live.textContent = text;
   }
 
+  // Replace the pane text without moving the reader. Whether to follow the output is decided from where the
+  // scrollbar is right now (not from a flag a scroll event updates a frame later), so scrolling up can never be
+  // overridden by an update that lands in between. Each source line is its own block so long lines wrap. When
+  // the scrollback window is full the oldest lines drop off the top; the position is then shifted by the height
+  // of those lines so the same text stays under the reader.
   function showText(row, text) {
     const b = row.body; if (!b) return;
-    const wasStuck = b.stick;
-    b.term.textContent = text;
-    if (wasStuck) b.term.scrollTop = b.term.scrollHeight;
+    const term = b.term;
+    const stuck = term.scrollHeight - term.scrollTop - term.clientHeight <= STICK_PX;
+    const prevTop = term.scrollTop;
+    const oldLines = b.lines || [];
+    const oldEls = term.children;
+    const lines = text.split("\n");
+    let shift = 0;
+    if (!stuck && oldLines.length > 3 && oldEls.length === oldLines.length) {
+      const lim = Math.min(oldLines.length - 3, 400);
+      for (let k = 1; k <= lim; k++) {
+        if (oldLines[k] === lines[0] && oldLines[k + 1] === lines[1] && oldLines[k + 2] === lines[2]) {
+          shift = oldEls[k].offsetTop - oldEls[0].offsetTop;
+          break;
+        }
+      }
+    }
+    b.lines = lines;
+    term.replaceChildren.apply(term, lines.map(function (l) { return el("div", "khd-line", l); }));
+    term.scrollTop = stuck ? term.scrollHeight : Math.max(0, prevTop - shift);
+    b.stick = stuck;
+    b.jump.hidden = stuck;
   }
 
   function openStream(p, paneId, row) {

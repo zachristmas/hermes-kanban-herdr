@@ -45,7 +45,7 @@ div.khd-pane-head { cursor: default; opacity: 0.7; }
 .khd-live[data-state="connecting"]::before { background: #d29922; }
 .khd-bar .khd-btn { margin-left: auto; }
 .khd-term {
-  margin: 0; padding: 0.6rem 0.75rem; height: min(22rem, 55dvh); overflow: auto; white-space: pre; tab-size: 4;
+  margin: 0; padding: 0.6rem 0.75rem; height: min(22rem, 55dvh); overflow-y: auto; overflow-x: hidden; position: relative; tab-size: 4;
   font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.74rem; line-height: 1.4;
   background: var(--khd-well); color: var(--color-card-foreground, inherit);
   box-shadow: inset 0 1px 6px rgba(0, 0, 0, 0.25);
@@ -63,3 +63,5 @@ div.khd-pane-head { cursor: default; opacity: 0.7; }
   .khd-meta { display: none; }
   .khd-pane[data-open] .khd-pane-head .khd-meta { display: none; }
 }
+
+.khd-line { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 1.4em; }

@@ -3,7 +3,7 @@
   "label": "Kanban Herdr",
   "description": "Herdr panes linked to a kanban task, with a live read-only terminal view",
   "icon": "Package",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "tab": {
     "path": "/kanban-herdr",
     "position": "end",

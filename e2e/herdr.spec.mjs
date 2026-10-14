@@ -124,3 +124,58 @@ test("panes on another saved machine can be linked, labelled and streamed", asyn
   await row.locator('[data-testid="khd-unlink"]').click();
   await expect(row).toHaveCount(0);
 });
+
+test("scrolling up is not overridden by new output, and the reader's place is kept", async ({ page }) => {
+  const rows = Array.from({ length: 120 }, (_, i) => `row ${String(i).padStart(3, "0")} of the log`).join("\n") + "\n";
+  await fake("fake.append", { pane_id: "w1:p1", text: rows });
+  await open(page);
+  const a = page.locator('[data-testid="khd-pane"][data-pane-id="w1:p1"]');
+  await a.locator('[data-testid="khd-pane-head"]').click();
+  const term = a.locator('[data-testid="khd-term"]');
+  await expect(term).toContainText("row 119");
+  await expect.poll(() => term.evaluate((e) => e.scrollHeight - e.scrollTop - e.clientHeight)).toBeLessThan(4); // follows at the bottom
+  await term.evaluate((e) => { e.scrollTop = 120; });
+  await expect(a.locator('[data-testid="khd-jump"]')).toBeVisible();
+  for (let i = 0; i < 5; i++) {
+    await fake("fake.append", { pane_id: "w1:p1", text: `new line ${i}\n` });
+    await page.waitForTimeout(350);
+  }
+  await expect(term).toContainText("new line 4");
+  expect(await term.evaluate((e) => e.scrollTop)).toBe(120);
+  await a.locator('[data-testid="khd-jump"]').click();
+  await expect.poll(() => term.evaluate((e) => e.scrollHeight - e.scrollTop - e.clientHeight)).toBeLessThan(4);
+  await expect(a.locator('[data-testid="khd-jump"]')).toBeHidden();
+});
+
+test("when old lines scroll off the top the reader keeps the same text in view", async ({ page }) => {
+  const rows = Array.from({ length: 560 }, (_, i) => `row ${String(i).padStart(3, "0")} of the log`).join("\n") + "\n";
+  await fake("fake.append", { pane_id: "w1:p1", text: rows }); // more than the 500-line window
+  await open(page);
+  const a = page.locator('[data-testid="khd-pane"][data-pane-id="w1:p1"]');
+  await a.locator('[data-testid="khd-pane-head"]').click();
+  const term = a.locator('[data-testid="khd-term"]');
+  await expect(term).toContainText("row 559");
+  await term.evaluate((e) => { e.scrollTop = 2000; });
+  const topRow = () => term.evaluate((e) => {
+    const kids = Array.from(e.children);
+        const hit = kids.find((k) => k.getBoundingClientRect().bottom > e.getBoundingClientRect().top + 4);
+    return hit ? hit.textContent : null;
+  });
+  const before = await topRow();
+  await fake("fake.append", { pane_id: "w1:p1", text: "extra a\nextra b\nextra c\n" });
+  await expect(term).toContainText("extra c");
+  expect(await topRow()).toBe(before);
+});
+
+test("long lines wrap instead of scrolling sideways", async ({ page }) => {
+  const long = "word ".repeat(120).trim();
+  await fake("fake.append", { pane_id: "w1:p1", text: long + "\n" });
+  await open(page);
+  const a = page.locator('[data-testid="khd-pane"][data-pane-id="w1:p1"]');
+  await a.locator('[data-testid="khd-pane-head"]').click();
+  const term = a.locator('[data-testid="khd-term"]');
+  await expect(term).toContainText("word word word");
+  const m = await term.evaluate((e) => ({ sw: e.scrollWidth, cw: e.clientWidth, h: e.querySelector(".khd-line:nth-last-child(2)").getBoundingClientRect().height }));
+  expect(m.sw).toBeLessThanOrEqual(m.cw + 1);
+  expect(m.h).toBeGreaterThan(40); // the long line took several rows
+});

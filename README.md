@@ -12,6 +12,8 @@ panes working on a task, one open at a time, with a live, read-only view of the 
   live while it is open.
 - **link a pane** attaches any existing pane to the task; **unlink** detaches it.
 - Panes that have closed stay listed under the task as history.
+- Lines wrap, and the view follows new output only while you are at the bottom: scroll up and it stays put
+  (with a **↓ latest** button), even as old lines scroll off the top of the window.
 - Read-only: the plugin never sends keys or input to a pane and never closes one.
 
 ## How panes get linked
