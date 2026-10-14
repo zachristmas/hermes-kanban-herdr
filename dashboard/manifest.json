@@ -1,0 +1,15 @@
+{
+  "name": "kanban-herdr",
+  "label": "Kanban Herdr",
+  "description": "Herdr panes linked to a kanban task, with a live read-only terminal view",
+  "icon": "Package",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/kanban-herdr",
+    "position": "end",
+    "hidden": true
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

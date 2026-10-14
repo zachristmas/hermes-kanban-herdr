@@ -1,0 +1,15 @@
+{
+  "name": "hermes-kanban-herdr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Herdr panes linked to a Hermes kanban task, with a live read-only terminal view",
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests",
+    "e2e": "cd e2e && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,65 @@
+/* The theme has --background and --color-card but no --color-background / --color-foreground. */
+.khd-section { --khd-well: color-mix(in srgb, var(--background, #111) 78%, black); }
+@supports (background: oklch(from red l c h)) {
+  .khd-section { --khd-well: oklch(from var(--background, #111) calc(l - 0.07) c h); }
+}
+
+.khd-btn {
+  font: inherit; font-size: 0.68rem; font-weight: 500; letter-spacing: 0; text-transform: none;
+  padding: 0.1rem 0.45rem; margin-left: 0.35rem; cursor: pointer; touch-action: manipulation;
+  color: var(--color-muted-foreground); background: transparent;
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm, 0.25rem);
+}
+.khd-btn:hover { color: var(--color-card-foreground, inherit); border-color: var(--color-ring); }
+.khd-section > .hermes-kanban-section-head-row { display: flex; align-items: center; gap: 0.25rem; }
+.khd-section > .hermes-kanban-section-head-row > .hermes-kanban-section-head { margin-right: auto; }
+
+.khd-note { padding: 0.4rem 0.1rem; color: var(--color-muted-foreground); font-size: 0.78rem; }
+.khd-list { display: flex; flex-direction: column; gap: 0.4rem; }
+.khd-pane {
+  position: relative; border: 1px solid var(--color-border); border-radius: var(--radius-sm, 0.25rem);
+  background: color-mix(in srgb, currentColor 3%, transparent); overflow: hidden;
+}
+.khd-pane[data-open] { border-color: color-mix(in srgb, var(--color-ring) 55%, var(--color-border)); }
+.khd-pane-head {
+  display: flex; align-items: center; gap: 0.5rem; width: 100%; padding: 0.5rem 0.65rem; min-height: 2.4rem;
+  font: inherit; font-size: 0.8rem; text-align: left; color: inherit; background: transparent; border: 0; cursor: pointer;
+}
+div.khd-pane-head { cursor: default; opacity: 0.7; }
+.khd-chev { width: 0.9rem; flex: 0 0 auto; color: var(--color-muted-foreground); }
+.khd-dot { width: 0.55rem; height: 0.55rem; flex: 0 0 auto; border-radius: 50%; background: var(--color-muted-foreground); }
+.khd-dot[data-status="working"] { background: var(--color-primary, #6ea8fe); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary, #6ea8fe) 25%, transparent); }
+.khd-dot[data-status="done"] { background: #3fb950; }
+.khd-dot[data-status="blocked"] { background: var(--color-destructive, #f66); }
+.khd-title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.khd-meta { margin-left: auto; color: var(--color-muted-foreground); font-size: 0.7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.khd-unlink { position: absolute; top: 0.45rem; right: 0.5rem; display: none; }
+.khd-pane[data-open] .khd-unlink { display: inline-block; }
+.khd-pane[data-open] .khd-pane-head .khd-meta { margin-right: 3.6rem; }
+
+.khd-pane-body { border-top: 1px solid var(--color-border); }
+.khd-bar { display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0.65rem; font-size: 0.7rem; color: var(--color-muted-foreground); }
+.khd-live::before { content: ""; display: inline-block; width: 0.45rem; height: 0.45rem; margin-right: 0.35rem; border-radius: 50%; background: var(--color-muted-foreground); }
+.khd-live[data-state="live"]::before { background: #3fb950; }
+.khd-live[data-state="error"]::before { background: var(--color-destructive, #f66); }
+.khd-live[data-state="connecting"]::before { background: #d29922; }
+.khd-bar .khd-btn { margin-left: auto; }
+.khd-term {
+  margin: 0; padding: 0.6rem 0.75rem; height: min(22rem, 55dvh); overflow: auto; white-space: pre; tab-size: 4;
+  font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.74rem; line-height: 1.4;
+  background: var(--khd-well); color: var(--color-card-foreground, inherit);
+  box-shadow: inset 0 1px 6px rgba(0, 0, 0, 0.25);
+}
+
+.khd-picker { display: flex; flex-direction: column; gap: 0.25rem; max-height: 16rem; overflow: auto; margin-bottom: 0.5rem; padding: 0.3rem; border: 1px dashed var(--color-border); border-radius: var(--radius-sm, 0.25rem); }
+.khd-picker[hidden] { display: none; }
+.khd-pick { display: flex; gap: 0.6rem; align-items: baseline; padding: 0.4rem 0.5rem; font: inherit; font-size: 0.78rem; text-align: left; color: inherit; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm, 0.25rem); cursor: pointer; }
+.khd-pick:hover:not(:disabled) { border-color: var(--color-ring); }
+.khd-pick-title { font-weight: 600; white-space: nowrap; }
+
+@media (max-width: 640px) {
+  .khd-btn { padding: 0.3rem 0.6rem; font-size: 0.75rem; }
+  .khd-pane-head { min-height: 2.8rem; }
+  .khd-meta { display: none; }
+  .khd-pane[data-open] .khd-pane-head .khd-meta { display: none; }
+}
