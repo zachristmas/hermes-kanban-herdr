@@ -1,14 +1,26 @@
 """Kanban Herdr plugin backend, mounted at /api/plugins/kanban-herdr/.
 
-Read-only window onto Herdr (the terminal workspace manager) for the kanban task drawer:
+Window onto Herdr (the terminal workspace manager) for the kanban task drawer:
 
 * which panes belong to a task, found through pane tokens (``kanban_task`` / ``kanban_board``, set
   with ``herdr pane report-metadata``) or a manual link made from the drawer;
-* a live view of one pane at a time over a WebSocket, driven by Herdr's ``pane_updated`` events.
+* a live view of one pane at a time over a WebSocket, driven by Herdr's ``pane_updated`` events;
+* closing a pane (capturing its agent session first when one exists) and reopening that same
+  session later into a fresh pane -- see "close/reopen" below. Everything else here stays
+  read-only: no input or keys are ever sent to a pane, and nothing but ``/close`` ever ends one.
 
-It talks to Herdr's local socket directly (JSON lines, one request per connection). It never sends
-input, keys or close requests to a pane. The only writes are the link tokens and a small JSON file
-of manual links and recently seen panes under the Hermes home.
+It talks to Herdr's local socket directly (JSON lines, one request per connection), or on Windows
+(whose Python has no unix sockets) by shelling out to the ``herdr`` CLI. The writes are the link
+tokens, a small JSON file of manual links and recently seen panes, and (for close/reopen) a second
+JSON file of captured agent sessions, all under the Hermes home.
+
+Close/reopen (``pane.close`` / ``tab.create`` / ``agent.start`` / ``agent.get``) always goes
+through the ``herdr`` CLI directly, never the socket/CLI-dual ``rpc()`` used for everything else
+in this file: those four are not among the socket methods this plugin has confirmed
+(pane.list/get/read/report_metadata), there is no protocol doc in this repo to check real socket
+method names against, and a wrong guess here would silently do the wrong thing rather than fail
+cleanly. ``herdr pane close`` is, however, a CLI command directly confirmed against a live Herdr
+instance (see ``README.md``).
 """
 
 from __future__ import annotations
@@ -25,6 +37,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
@@ -59,6 +72,18 @@ KEEP_LINKS = 20
 KEEP_SEEN = 12
 RPC_TIMEOUT = 3.0
 LINE_LIMIT = 8 * 1024 * 1024
+RAW_CLI_TIMEOUT = RPC_TIMEOUT * 3
+AGENT_START_TIMEOUT = 90.0
+
+#: Per-agent-kind resume invocation, appended after ``herdr agent start ... --``. Add a kind here
+#: only once its resume syntax is confirmed against that agent's own ``--help`` (ideally live) --
+#: an unconfirmed guess would silently start a FRESH session instead of resuming, which is worse
+#: than refusing to reopen at all.
+RESUME_ARG_BUILDERS = {
+    "claude": lambda session_id: ["--resume", session_id],
+    "codex": lambda session_id: ["resume", session_id],
+}
+_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
 class HerdrUnavailable(Exception):
@@ -276,6 +301,35 @@ async def subscribe(types: list[str]) -> AsyncIterator[dict]:
         writer.close()
 
 
+async def _raw_cli(args: list[str], *, machine: Optional[str] = None, timeout: float = RAW_CLI_TIMEOUT) -> Any:
+    """Run one ``herdr`` subcommand outside the confirmed-socket-method set (``pane.close``,
+    ``tab.create``, ``agent.start``, ``agent.get``) and return its parsed ``result``. CLI-only on
+    every platform, regardless of ``_use_cli()`` -- see the module docstring for why. Parses the
+    same ``{"id": "cli:...", "result"/"error": ...}`` envelope ``_rpc_cli`` does."""
+    cmd = herdr_command() + (["--machine", machine] if machine else []) + args
+    env = _remote_env() if machine else None
+    try:
+        returncode, out, err = await _run_cli(cmd, timeout, env=env)
+    except asyncio.TimeoutError as exc:
+        raise HerdrUnavailable("herdr did not answer in time") from exc
+    except OSError as exc:
+        raise HerdrUnavailable(f"cannot run herdr: {exc}") from exc
+    for stream in (out.decode("utf-8", "replace"), err.decode("utf-8", "replace")):
+        try:
+            parsed = json.loads(stream.strip().splitlines()[-1]) if stream.strip() else None
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict) and str(parsed.get("id", "")).startswith("cli:") and ("result" in parsed or "error" in parsed):
+            if isinstance(parsed.get("error"), dict):
+                e = parsed["error"]
+                raise HerdrError(str(e.get("code", "error")), str(e.get("message", "")))
+            return parsed.get("result") or {}
+    if returncode != 0:
+        detail = (err or out).decode("utf-8", "replace").strip()
+        raise HerdrUnavailable(f"herdr {' '.join(args[:2])} failed (exit {returncode}): {detail}")
+    return {}
+
+
 def public_pane(p: dict) -> dict:
     tokens = p.get("tokens") or {}
     return {
@@ -451,6 +505,181 @@ class Store:
 store = Store()
 
 
+class ClosedSessionStore:
+    """closed_sessions.json: {"records": {terminal_id: {...}}}. A separate file from links.json
+    (different key, different kind of record -- a captured agent session, not a link) but the same
+    atomic tempfile+os.replace write ``Store`` uses."""
+
+    FILENAME = "closed_sessions.json"
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    @property
+    def path(self) -> Path:
+        return _data_dir() / self.FILENAME
+
+    def _load(self) -> dict:
+        try:
+            data = json.loads(self.path.read_text())
+            if isinstance(data, dict):
+                data.setdefault("records", {})
+                return data
+        except (OSError, ValueError):
+            pass
+        return {"records": {}}
+
+    def _save(self, data: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), prefix=".closed-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(data, fh, indent=1)
+            os.replace(tmp, self.path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def get(self, terminal_id: str) -> Optional[dict]:
+        with self._lock:
+            return self._load()["records"].get(terminal_id)
+
+    def put(self, terminal_id: str, record: dict) -> None:
+        with self._lock:
+            data = self._load()
+            data["records"][terminal_id] = record
+            self._save(data)
+
+    def remove(self, terminal_id: str) -> None:
+        with self._lock:
+            data = self._load()
+            if data["records"].pop(terminal_id, None) is not None:
+                self._save(data)
+
+
+closed_store = ClosedSessionStore()
+
+
+def resumable_kind(pane: dict) -> bool:
+    """True iff ``pane`` carries a capturable session of an agent kind this plugin knows how to
+    resume (``agent_session.kind == "id"`` with a value, and the agent itself is one of
+    ``RESUME_ARG_BUILDERS``)."""
+    session = pane.get("agent_session") or {}
+    return (
+        session.get("kind") == "id"
+        and bool(session.get("value"))
+        and pane.get("agent") in RESUME_ARG_BUILDERS
+    )
+
+
+class LifecycleError(Exception):
+    """A clean, reportable failure from ``reopen_session`` -- the route turns it into a 404."""
+
+
+def _safe_agent_name(preferred: str) -> str:
+    base = preferred if _NAME_RE.match(preferred) else re.sub(r"[^a-z0-9_-]", "-", preferred.lower())[:24]
+    if not base or not base[0].isalpha():
+        base = ("t" + base)[:32]
+    return base[:32]
+
+
+async def _agent_name_taken(name: str, *, machine: Optional[str]) -> bool:
+    try:
+        await _raw_cli(["agent", "get", name], machine=machine)
+        return True
+    except HerdrError as exc:
+        if exc.code == "agent_not_found":
+            return False
+        raise
+
+
+async def _unique_agent_name(preferred: str, *, machine: Optional[str]) -> str:
+    """``preferred`` if no live agent already holds that name on this machine, else a short
+    suffixed variant -- avoids colliding with another agent Herdr already knows about."""
+    base = _safe_agent_name(preferred)
+    if not await _agent_name_taken(base, machine=machine):
+        return base
+    suffix = uuid.uuid4().hex[:6]
+    return base[: 32 - len(suffix) - 1] + "-" + suffix
+
+
+async def close_pane(pane_id: str) -> bool:
+    """Capture a resumable session for ``pane_id`` (when it has one of a supported kind), then
+    close it. Returns whether a session was captured (so ``/reopen`` can later work). Closing
+    always proceeds: a plain shell or an unsupported agent kind just closes with nothing to
+    reopen, never refused on that account."""
+    machine, local_pane = split_ref(pane_id)
+    pane = (await rpc("pane.get", {"pane_id": pane_id})).get("pane") or {}
+    terminal_id = pane.get("terminal_id")
+    reopenable = False
+    if terminal_id and resumable_kind(pane):
+        session = pane["agent_session"]
+        closed_store.put(terminal_id, {
+            "terminal_id": terminal_id,
+            "kind": pane.get("agent"),
+            "session_id": session.get("value"),
+            "cwd": pane.get("cwd"),
+            "workspace_id": pane.get("workspace_id"),
+            "machine": machine,
+            "title": pane.get("terminal_title_stripped") or pane.get("terminal_title") or "",
+            "closed_at": time.time(),
+        })
+        reopenable = True
+    await _raw_cli(["pane", "close", local_pane], machine=machine)
+    return reopenable
+
+
+async def reopen_session(terminal_id: str, *, task: str, board: Optional[str]) -> dict:
+    """Resume a previously-closed session (looked up by ``terminal_id``) into a fresh pane, tag it
+    for ``task``/``board`` and forget the closed-session record. Raises :class:`LifecycleError`
+    (never guesses) when nothing usable was recorded."""
+    record = closed_store.get(terminal_id)
+    if record is None:
+        raise LifecycleError("no closed session recorded for this pane; it may already have been reopened")
+    kind = record.get("kind")
+    builder = RESUME_ARG_BUILDERS.get(kind)
+    session_id = record.get("session_id")
+    if builder is None or not session_id:
+        raise LifecycleError(f"recorded session has no supported resume (agent kind {kind!r})")
+    workspace_id = record.get("workspace_id")
+    if not workspace_id:
+        raise LifecycleError("recorded session has no workspace to reopen into")
+    machine = record.get("machine")
+    cwd = record.get("cwd") or "."
+    name = await _unique_agent_name(record.get("title") or "reopened", machine=machine)
+
+    created = await _raw_cli(
+        ["tab", "create", "--workspace", workspace_id, "--cwd", cwd, "--label", name, "--no-focus"],
+        machine=machine,
+    )
+    root_pane = (created or {}).get("root_pane") or {}
+    new_pane_id = root_pane.get("pane_id")
+    if not new_pane_id:
+        raise LifecycleError("herdr did not return a new pane for the reopened session")
+
+    resume_args = builder(session_id)
+    await _raw_cli(
+        ["agent", "start", name, "--kind", kind, "--pane", new_pane_id, "--timeout", "60000", "--", *resume_args],
+        machine=machine, timeout=AGENT_START_TIMEOUT,
+    )
+
+    full_pane_id = f"{machine}~{new_pane_id}" if machine else new_pane_id
+    tokens: dict[str, Optional[str]] = {TOKEN_TASK: task}
+    if board:
+        tokens[TOKEN_BOARD] = board
+    try:
+        await rpc("pane.report_metadata", {"pane_id": full_pane_id, "source": SOURCE, "tokens": tokens})
+    except (HerdrError, HerdrUnavailable) as exc:
+        log.warning("kanban-herdr: reopened %s but could not tag it for the task: %s", full_pane_id, exc)
+
+    closed_store.remove(terminal_id)
+    pane = (await rpc("pane.get", {"pane_id": full_pane_id})).get("pane") or {}
+    return public_pane(pane)
+
+
 def key_of(board: Optional[str], task: str) -> str:
     return f"{board or 'default'}:{task}"
 
@@ -493,7 +722,7 @@ async def panes_for_task(task: str = Query(...), board: Optional[str] = Query(No
     for p in panes:
         why = match_reasons(p, task, board, manual)
         if why:
-            matched.append({**public_pane(p), "linked_by": why})
+            matched.append({**public_pane(p), "linked_by": why, "resumable": resumable_kind(p)})
 
     def remember(d: dict) -> None:
         seen = d["seen"].setdefault(key, [])
@@ -512,7 +741,11 @@ async def panes_for_task(task: str = Query(...), board: Optional[str] = Query(No
     if matched:
         store.update(remember)
     live_terms = {p.get("terminal_id") for p in panes}
-    closed = [e for e in store.read()["seen"].get(key, []) if e.get("terminal_id") not in live_terms]
+    closed = [
+        {**e, "reopenable": closed_store.get(e.get("terminal_id")) is not None}
+        for e in store.read()["seen"].get(key, [])
+        if e.get("terminal_id") not in live_terms
+    ]
     return {"available": True, "panes": matched, "closed": closed[-KEEP_SEEN:], "unreachable": list(unreachable)}
 
 
@@ -594,6 +827,46 @@ async def unlink_pane(body: LinkBody):
 
     store.update(drop)
     return {"ok": True}
+
+
+class CloseBody(BaseModel):
+    pane_id: str
+
+
+class ReopenBody(BaseModel):
+    terminal_id: str
+    task: str
+    board: Optional[str] = None
+
+
+@router.post("/close")
+async def close_pane_route(body: CloseBody):
+    pane_id = _check_id(body.pane_id, "pane_id")
+    try:
+        reopenable = await close_pane(pane_id)
+    except HerdrError as exc:
+        if exc.code == "pane_not_found":
+            raise HTTPException(status_code=404, detail="pane not found") from exc
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except HerdrUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "reopenable": reopenable}
+
+
+@router.post("/reopen")
+async def reopen_pane_route(body: ReopenBody):
+    terminal_id = _check_id(body.terminal_id, "terminal_id")
+    task = _check_id(body.task, "task")
+    board = _check_board(body.board)
+    try:
+        pane = await reopen_session(terminal_id, task=task, board=board)
+    except LifecycleError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except HerdrError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except HerdrUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return pane
 
 
 # --- live stream ------------------------------------------------------------

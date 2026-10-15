@@ -4,6 +4,11 @@
 // or a manual link) as an accordion. Opening one shows its terminal text live, read-only, over a
 // WebSocket served by this plugin's backend. One pane is open at a time. Nothing from a pane is
 // ever interpreted as HTML: text goes in through textContent.
+//
+// A live pane can also be closed ("close" button), and a closed pane whose agent session was
+// captured can be resumed into a fresh pane ("reopen" button, shown only when the backend reports
+// it as reopenable). Closing is destructive -- it ends the agent's terminal -- so it is confirmed
+// the same way "unlink" is.
 (function () {
   "use strict";
 
@@ -127,7 +132,7 @@
       const id = "closed:" + c.terminal_id;
       want.add(id);
       let row = p.rows.get(id);
-      if (!row) { row = makeClosedRow(c); p.rows.set(id, row); p.list.appendChild(row.el); }
+      if (!row) { row = makeClosedRow(p, c); p.rows.set(id, row); p.list.appendChild(row.el); }
     });
     p.rows.forEach(function (row, id) {
       if (want.has(id)) return;
@@ -152,7 +157,9 @@
     h.append(chev, dot, title, meta);
     const unlink = btn("unlink", "khd-unlink", "Remove this link (the pane keeps running)");
     unlink.classList.add("khd-unlink");
-    rowEl.append(h, unlink);
+    const close = btn("close", "khd-close", "Close this Herdr pane");
+    close.classList.add("khd-close");
+    rowEl.append(h, unlink, close);
     const row = { el: rowEl, head: h, dot: dot, title: title, meta: meta, chev: chev, body: null, pane: pane };
     h.addEventListener("click", function (e) { e.stopPropagation(); toggle(p, row); });
     unlink.addEventListener("click", function (e) {
@@ -162,6 +169,14 @@
       postJSON("/unlink", { task: p.taskId, board: board() || null, pane_id: row.pane.pane_id })
         .then(function () { return load(p); })
         .catch(function (err) { window.alert("Could not unlink: " + ((err && err.message) || err)); });
+    });
+    close.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (!window.confirm("Close this Herdr pane? This ends its terminal. If the agent's session can be resumed, a “reopen” button will appear here afterward.")) return;
+      if (p.openId === row.pane.pane_id) closeOpen(p);
+      postJSON("/close", { pane_id: row.pane.pane_id })
+        .then(function () { return load(p); })
+        .catch(function (err) { window.alert("Could not close: " + ((err && err.message) || err)); });
     });
     return row;
   }
@@ -175,13 +190,25 @@
     row.meta.textContent = statusText(pane) + " · " + pane.pane_id.split("~").pop();
   }
 
-  function makeClosedRow(c) {
+  function makeClosedRow(p, c) {
     const rowEl = el("div", "khd-pane khd-closed");
     rowEl.setAttribute("data-testid", "khd-closed");
     const h = el("div", "khd-pane-head");
     h.append(el("span", "khd-chev", "·"), el("span", "khd-dot"), el("span", "khd-title", c.title || c.pane_id),
       el("span", "khd-meta", "closed · last " + (c.last_status || "unknown")));
     rowEl.appendChild(h);
+    if (c.reopenable) {
+      const reopen = btn("reopen", "khd-reopen", "Resume this agent's session into a new Herdr pane");
+      reopen.classList.add("khd-reopen");
+      reopen.addEventListener("click", function (e) {
+        e.stopPropagation();
+        reopen.disabled = true;
+        postJSON("/reopen", { terminal_id: c.terminal_id, task: p.taskId, board: board() || null })
+          .then(function () { return load(p); })
+          .catch(function (err) { reopen.disabled = false; window.alert("Could not reopen: " + ((err && err.message) || err)); });
+      });
+      rowEl.appendChild(reopen);
+    }
     return { el: rowEl };
   }
 

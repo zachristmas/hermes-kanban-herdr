@@ -1,6 +1,13 @@
 // Needs: a dashboard with kanban-herdr enabled and HERDR_SOCKET_PATH pointing at the
 // fake server (python3 tests/fake_herdr.py <sock>), and FAKE_HERDR_SOCK set to the same path.
 // HERMES_TASK defaults to the sandbox task.
+//
+// Close/reopen (khd-close / khd-reopen) are NOT covered here: close_pane()/reopen_session() go
+// through the herdr CLI directly (pane.close / tab.create / agent.start / agent.get -- see
+// plugin_api.py's module docstring), which means the dashboard process this harness launches
+// would need HERDR_BIN pointed at tests/stub_herdr_cli.py, not just HERDR_SOCKET_PATH -- that's
+// how the dashboard is *started*, outside this spec file's control. tests/test_api.py exercises
+// close/reopen directly instead (including a real stub-CLI round trip). Noted gap, not fixed here.
 import net from "node:net";
 import { test, expect } from "@playwright/test";
 

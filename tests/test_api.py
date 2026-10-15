@@ -126,6 +126,87 @@ class LinkTests(Base):
         self.assertEqual(self.client.post(self.url("/link"), json={"task": "t_new", "pane_id": "w1:p3;rm"}).status_code, 400)
 
 
+class CloseReopenTests(Base):
+    """close()/reopen() always go through the herdr CLI (see plugin_api's module docstring), so
+    HERDR_BIN points at the stub here regardless of which transport the rest of a case uses."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["HERDR_BIN"] = f'{sys.executable} {HERE / "stub_herdr_cli.py"}'
+        self.addCleanup(os.environ.pop, "HERDR_BIN", None)
+        self.herdr.add("w1:p1", title="gsd-t_a1", agent="claude", status="working",
+                        tokens={"kanban_task": "t_a1", "kanban_board": "gsd"}, text="one\ntwo\n",
+                        agent_session={"agent": "claude", "kind": "id", "source": "herdr:claude", "value": "sess-abc"})
+        self.herdr.add("w1:p4", title="cursor pane", agent="cursor", status="working",
+                        agent_session={"agent": "cursor", "kind": "id", "source": "herdr:cursor", "value": "sess-xyz"})
+
+    def live_panes(self):
+        return self.herdr.call(lambda: dict(self.herdr.fake.panes))
+
+    def test_close_captures_session_and_reports_reopenable(self):
+        r = self.client.post(self.url("/close"), json={"pane_id": "w1:p1"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json(), {"ok": True, "reopenable": True})
+        self.assertNotIn("w1:p1", self.live_panes())
+
+    def test_close_plain_shell_still_closes_without_a_session(self):
+        r = self.client.post(self.url("/close"), json={"pane_id": "w1:p3"})
+        self.assertEqual(r.json(), {"ok": True, "reopenable": False})
+        self.assertNotIn("w1:p3", self.live_panes())
+
+    def test_close_unsupported_agent_kind_still_closes_without_a_session(self):
+        r = self.client.post(self.url("/close"), json={"pane_id": "w1:p4"})
+        self.assertEqual(r.json(), {"ok": True, "reopenable": False})
+        self.assertNotIn("w1:p4", self.live_panes())
+
+    def test_close_unknown_pane_is_404(self):
+        self.assertEqual(self.client.post(self.url("/close"), json={"pane_id": "w9:p9"}).status_code, 404)
+
+    def test_close_rejects_bad_pane_id(self):
+        self.assertEqual(self.client.post(self.url("/close"), json={"pane_id": "bad id"}).status_code, 400)
+
+    def test_panes_endpoint_marks_resumable_live_pane(self):
+        r = self.client.get(self.url("/panes"), params={"task": "t_a1", "board": "gsd"}).json()
+        self.assertTrue(r["panes"][0]["resumable"])
+
+    def test_closed_history_shows_reopenable_only_after_a_captured_close(self):
+        self.client.post(self.url("/close"), json={"pane_id": "w1:p1"})
+        r = self.client.get(self.url("/panes"), params={"task": "t_a1", "board": "gsd"}).json()
+        self.assertEqual(len(r["closed"]), 1)
+        self.assertTrue(r["closed"][0]["reopenable"])
+
+    def test_reopen_resumes_into_a_fresh_pane_and_tags_it(self):
+        self.client.post(self.url("/close"), json={"pane_id": "w1:p1"})
+        closed = self.client.get(self.url("/panes"), params={"task": "t_a1", "board": "gsd"}).json()["closed"][0]
+        term = closed["terminal_id"]
+        resp = self.client.post(self.url("/reopen"), json={"terminal_id": term, "task": "t_a1", "board": "gsd"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        pane = resp.json()
+        self.assertEqual(pane["task"], "t_a1")
+        self.assertEqual(pane["board"], "gsd")
+        self.assertEqual(pane["agent"], "claude")
+        agents = self.herdr.call(lambda: dict(self.herdr.fake.agents))
+        self.assertEqual(len(agents), 1)
+        self.assertEqual(next(iter(agents.values()))["agent_session"]["value"], "sess-abc")
+
+    def test_reopen_without_a_recorded_session_is_404(self):
+        r = self.client.post(self.url("/reopen"), json={"terminal_id": "term_never_closed", "task": "t_a1"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_stale_reopen_cannot_be_replayed(self):
+        self.client.post(self.url("/close"), json={"pane_id": "w1:p1"})
+        closed = self.client.get(self.url("/panes"), params={"task": "t_a1", "board": "gsd"}).json()["closed"][0]
+        term = closed["terminal_id"]
+        first = self.client.post(self.url("/reopen"), json={"terminal_id": term, "task": "t_a1", "board": "gsd"})
+        self.assertEqual(first.status_code, 200)
+        second = self.client.post(self.url("/reopen"), json={"terminal_id": term, "task": "t_a1", "board": "gsd"})
+        self.assertEqual(second.status_code, 404)
+
+    def test_reopen_rejects_bad_ids(self):
+        self.assertEqual(self.client.post(self.url("/reopen"), json={"terminal_id": "../x", "task": "t_a1"}).status_code, 400)
+        self.assertEqual(self.client.post(self.url("/reopen"), json={"terminal_id": "t1", "task": "t a1"}).status_code, 400)
+
+
 class StreamTests(Base):
     def stream(self, pane="w1:p1"):
         return self.client.websocket_connect(self.url("/stream") + f"?pane={pane}")

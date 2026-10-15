@@ -1,9 +1,12 @@
 """A small stand-in for Herdr's local socket, used by the tests and the browser e2e.
 
 Speaks the same JSON-lines protocol for the handful of methods the plugin uses
-(pane.list / pane.get / pane.read / pane.report_metadata / events.subscribe) and emits
-``pane_updated`` events. Extra control methods (``fake.add``, ``fake.append``, ``fake.close``,
-``fake.status``, ``fake.reset``) let a test drive it over the same socket.
+(pane.list / pane.get / pane.read / pane.report_metadata / events.subscribe), plus the
+close/reopen set the plugin reaches only through the ``herdr`` CLI (pane.close / tab.create /
+agent.start / agent.get -- modelled here too since ``stub_herdr_cli.py`` forwards those over this
+same socket), and emits ``pane_updated`` events. Extra control methods (``fake.add``,
+``fake.append``, ``fake.close``, ``fake.status``, ``fake.reset``) let a test drive it over the
+same socket.
 
     python3 fake_herdr.py /tmp/fake-herdr.sock     # runs until killed
 """
@@ -22,12 +25,15 @@ class FakeHerdr:
         self.path = path
         self.subscribe_works = subscribe_works
         self.panes: dict[str, dict] = {}
+        self.agents: dict[str, dict] = {}
+        self._pane_seq = 0
         self.subs: list[asyncio.StreamWriter] = []
         self.server = None
 
     # -- state -----------------------------------------------------------
     def add(self, pane_id: str, title: str = "", agent: str | None = None, status: str = "idle",
-            cwd: str = "/tmp", tokens: dict | None = None, text: str = "", terminal_id: str | None = None) -> None:
+            cwd: str = "/tmp", tokens: dict | None = None, text: str = "", terminal_id: str | None = None,
+            agent_session: dict | None = None) -> None:
         self.panes[pane_id] = {
             "pane_id": pane_id, "terminal_id": terminal_id or f"term_{pane_id.replace(':', '_')}",
             "workspace_id": pane_id.split(":")[0], "tab_id": pane_id.split(":")[0] + ":t1",
@@ -35,6 +41,7 @@ class FakeHerdr:
             "agent_status": status, "focused": False, "revision": 1, "tokens": dict(tokens or {}),
             "scroll": {"max_offset_from_bottom": 0, "offset_from_bottom": 0, "viewport_rows": 50},
             "_text": text, **({"agent": agent} if agent else {}),
+            **({"agent_session": agent_session} if agent_session else {}),
         }
 
     def info(self, pane_id: str) -> dict:
@@ -74,6 +81,34 @@ class FakeHerdr:
             return {"id": rid, "result": {"type": "pane_read", "read": {
                 "pane_id": pid, "workspace_id": self.panes[pid]["workspace_id"], "source": params.get("source"),
                 "format": "text", "text": text, "revision": self.panes[pid]["revision"], "truncated": False}}}
+        if method == "pane.close":
+            self.panes.pop(pid, None)
+            return {"id": rid, "result": {"type": "ok"}}
+        if method == "agent.get":
+            name = params.get("name")
+            agent = self.agents.get(name)
+            if agent is None:
+                return self._err(rid, "agent_not_found", f"no agent named {name!r}")
+            return {"id": rid, "result": {"type": "agent_info", "agent": agent}}
+        if method == "tab.create":
+            self._pane_seq += 1
+            ws = params.get("workspace") or "w1"
+            new_pane_id = f"{ws}:auto{self._pane_seq}"
+            self.add(new_pane_id, title=params.get("label") or "", cwd=params.get("cwd") or "/tmp")
+            return {"id": rid, "result": {"type": "tab_created",
+                     "root_pane": {"pane_id": new_pane_id, "workspace_id": ws}}}
+        if method == "agent.start":
+            name, kind, target = params.get("name"), params.get("kind"), params.get("pane_id")
+            if target not in self.panes:
+                return self._err(rid, "pane_not_found", f"pane {target} not found")
+            session_id = params.get("resume_session_id") or f"sess-{name}"
+            session = {"agent": kind, "kind": "id", "source": f"herdr:{kind}", "value": session_id}
+            self.panes[target]["agent"] = kind
+            self.panes[target]["agent_session"] = session
+            agent = {"name": name, "agent": kind, "pane_id": target,
+                      "workspace_id": self.panes[target]["workspace_id"], "agent_session": session}
+            self.agents[name] = agent
+            return {"id": rid, "result": {"type": "agent_started", "agent": agent}}
         if method == "pane.report_metadata":
             toks = self.panes[pid]["tokens"]
             for k, v in (params.get("tokens") or {}).items():

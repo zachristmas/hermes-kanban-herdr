@@ -37,6 +37,30 @@ elif a[:2] == ["pane", "report-metadata"]:
             tokens[a[i + 1]] = None
         i += 2
     method, params = "pane.report_metadata", {"pane_id": a[2], "tokens": tokens}
+elif a[:2] == ["pane", "close"]:
+    method, params = "pane.close", {"pane_id": a[2]}
+elif a[:2] == ["agent", "get"]:
+    method, params = "agent.get", {"name": a[2]}
+elif a[:2] == ["tab", "create"]:
+    opts, i = {}, 2
+    while i < len(a):
+        if a[i] == "--no-focus":
+            i += 1
+            continue
+        opts[a[i]] = a[i + 1]
+        i += 2
+    method, params = "tab.create", {"workspace": opts.get("--workspace"), "cwd": opts.get("--cwd"),
+                                     "label": opts.get("--label")}
+elif a[:2] == ["agent", "start"]:
+    name, rest, opts, resume_args, i = a[2], a[3:], {}, [], 0
+    while i < len(rest):
+        if rest[i] == "--":
+            resume_args = rest[i + 1:]
+            break
+        opts[rest[i]] = rest[i + 1]
+        i += 2
+    method, params = "agent.start", {"name": name, "kind": opts.get("--kind"), "pane_id": opts.get("--pane"),
+                                      "resume_session_id": resume_args[-1] if resume_args else None}
 else:
     print(json.dumps({"id": "cli", "error": {"code": "unknown_command", "message": " ".join(a)}}))
     sys.exit(1)

@@ -14,7 +14,9 @@ panes working on a task, one open at a time, with a live, read-only view of the 
 - Panes that have closed stay listed under the task as history.
 - Lines wrap, and the view follows new output only while you are at the bottom: scroll up and it stays put
   (with a **↓ latest** button), even as old lines scroll off the top of the window.
-- Read-only: the plugin never sends keys or input to a pane and never closes one.
+- The live view itself is still read-only: the plugin never sends keys or input to a pane.
+  **close** and **reopen** are the exception (see below) — this plugin can end a pane's terminal
+  and start a new agent process in its place.
 
 ## How panes get linked
 
@@ -32,6 +34,41 @@ panes working on a task, one open at a time, with a live, read-only view of the 
    link in `<HERMES_HOME>/plugin-data/kanban-herdr/links.json` (override with `KANBAN_HERDR_DATA`).
 
 Tokens are a hint for display, not authorization.
+
+## Closing and reopening a pane
+
+Each live pane row has a **close** button, and each closed/history row that can be resumed has a
+**reopen** button.
+
+- **close** asks for confirmation, then ends the pane's terminal (`herdr pane close`). Before
+  closing, the plugin checks whether the pane is running a supported agent (currently Claude Code
+  or Codex) with a resumable session id, and if so captures `{agent kind, session id, cwd,
+  workspace}` into `<HERMES_HOME>/plugin-data/kanban-herdr/closed_sessions.json` (override with
+  `KANBAN_HERDR_DATA`, same as `links.json`). A pane with nothing resumable (a plain shell, or an
+  agent kind this plugin doesn't know how to resume) still closes; it just has no reopen option
+  afterward. **This is destructive and not undoable by this plugin**: once a pane is closed, Herdr
+  itself has no server-side record of the agent that was in it, so if the session wasn't captured
+  first (or capture failed), the work in that pane is gone.
+- **reopen** looks up the captured record for that pane's history row, creates a new Herdr tab in
+  the same workspace, starts a fresh agent process there, and resumes the captured session into
+  it (`claude --resume <id>` / `codex resume <id>`). The new pane is tagged with the task's tokens
+  immediately, so it shows up as a live pane on the next refresh. The captured record is consumed
+  on a successful reopen — it cannot be replayed into a second pane.
+
+Only Claude Code and Codex sessions are supported; closing a pane running anything else (or a
+plain shell) is safe but gives no reopen option. The close/reopen actions always go through the
+`herdr` CLI directly (never a cached/stale view), so they need the same `herdr` command this
+plugin already resolves for everything else (see "Install" below).
+
+**Security implications of close/reopen:** this plugin can now terminate a running agent's
+terminal and launch a new process (a new agent CLI invocation, resuming a specific session) on
+the dashboard host, triggered by anyone who can open the task drawer. That is a materially larger
+capability than the rest of this plugin (which only reads pane text and sets/clears two Herdr
+tokens). It does not grant arbitrary command execution — only `herdr pane close`, `herdr tab
+create` and `herdr agent start --kind {claude,codex} -- --resume/resume <captured id>` ever run,
+with no attacker-controlled arguments beyond ids this plugin itself captured from Herdr — but
+anyone who can reach the dashboard's close/reopen endpoints can end another person's agent session
+and start a new one in its place. Treat dashboard access accordingly.
 
 ## Agent tool: `kanban_herdr_link`
 
@@ -103,7 +140,7 @@ same API shapes, because the CLI prints the same JSON the socket returns.
 ## Testing
 
 ```
-python3 -m unittest discover -s tests      # API tests against a fake Herdr socket, run over both transports (57)
+python3 -m unittest discover -s tests      # API tests against a fake Herdr socket, run over both transports (68)
 ```
 
 Browser tests (Playwright, `data-testid` selectors) need a dashboard with the plugin enabled
